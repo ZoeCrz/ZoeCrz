@@ -1,5 +1,6 @@
 """Compose the native GitSkins panels over one Midnight background."""
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from datetime import date, timedelta
 from html import escape
 from html.parser import HTMLParser
@@ -29,6 +30,7 @@ THEMES = {
     "galaxy": "midnight",
     "projects": "midnight",
     "stack": "midnight",
+    "social": "midnight",
     "city": "aurora",
 }
 TAGS = set("""
@@ -123,7 +125,7 @@ def panel(section, avatar):
     params = {"username": USER.lower(), "mode": "dark"}
     if THEMES[section]:
         params["theme"] = THEMES[section]
-    if section in {"sheet-main", "galaxy", "projects", "stack", "city"}:
+    if section in {"sheet-main", "galaxy", "projects", "stack", "social", "city"}:
         params["avatar"] = avatar
     payload, mime = fetch(GITSKINS + section + "?" + urlencode(params))
     if mime != "image/svg+xml" or re.search(rb"<!DOCTYPE|<!ENTITY", payload, re.I):
@@ -154,52 +156,88 @@ def panel(section, avatar):
     return root
 
 
-def project_card(parent, repo, index):
-    x = 28 + 410 * (index % 2)
-    y = 76 + 166 * (index // 2)
-    card = element(parent, "g", transform=f"translate({x} {y})")
-    element(card, "rect", width=394, height=150, rx=13,
-            fill="#08080c", fill_opacity=".55", stroke="#818cf8", stroke_opacity=".65")
-    element(card, "line", x1=0, x2=394, y1=29, y2=29, stroke="#818cf8", stroke_opacity=".45")
-    element(card, "circle", cx=378, cy=15, r=4, fill="#3fb950")
+def project_card(template, repo, languages):
+    card = deepcopy(template)
+    ns = f"{{{SVG}}}"
     name = repo["name"]
-    label = name if len(name) <= 31 else name[:30] + "…"
-    element(card, "text", x=16, y=19, fill="#a5b4fc", font_family=MONO, font_size=11).text = f"• {label}"
-    element(card, "text", x=18, y=56, fill="#e0e7ff", font_family=MONO,
-            font_size=17, font_weight=700).text = label
-    description = repo.get("description") or "Sin descripción"
-    for row, line in enumerate(wrap(description, width=48, max_lines=2, placeholder="…")):
-        element(card, "text", x=18, y=78 + row * 16, fill="#a5b4fc", font_family=MONO, font_size=12).text = line
-    language = shorten(repo.get("language") or "Sin lenguaje", width=32, placeholder="…")
-    element(card, "rect", x=18, y=110, width=20 + 7 * len(language), height=22, rx=11,
-            fill="#818cf8", fill_opacity=".16", stroke="#818cf8", stroke_opacity=".45")
-    element(card, "text", x=28, y=125, fill="#b4bcff", font_family=MONO, font_size=11).text = language
-    element(card, "text", x=374, y=125, text_anchor="end", fill="#d7b9fc", font_family=MONO,
-            font_size=13).text = f"★ {repo['stargazers_count']:,}"
+    name = name if len(name) <= 27 else name[:26] + "…"
+    text = {node.get("y"): node for node in card.findall(ns + "text")}
+    text["19.5"].find(ns + "tspan").tail = f" {name}"
+    text["58"].text = name + " "
+    descriptions = wrap(repo.get("description") or "Sin descripción", width=40, max_lines=2, placeholder="…")
+    for y, line in zip(("79", "95"), (descriptions + ["", ""])[:2]):
+        if y not in text:
+            text[y] = element(card, "text", x=18, y=y, font_family=MONO, font_size=11.5, fill="#a5b4fc")
+        text[y].text = line
+    language = shorten(repo.get("language") or "Sin lenguaje", width=24, placeholder="…")
+    chip_width = 18 + 6 * len(language)
+    chip = next(rect for rect in card.findall(ns + "rect") if rect.get("y") == "112")
+    chip.set("width", str(chip_width))
+    text["124.5"].set("x", str(18 + chip_width / 2))
+    text["124.5"].text = language
+    metadata = text["150"].findall(ns + "tspan")
+    metadata[1].text = "updated " + repo["updated_at"][:10]
+    metadata[0].tail = f" {repo['stargazers_count']:,}"
+
+    colors = {"Python": "#3572a5", "Java": "#b07219", "HTML": "#e34c26", "JavaScript": "#f1e05a",
+              "ASP.NET": "#9400ff", "C#": "#178600", "CSS": "#663399", "C++": "#f34b7d"}
+    palette = ("#818cf8", "#c084fc", "#67e8f9", "#fbbf24", "#fb7185")
+    for ring in card.findall(ns + "circle"):
+        if ring.get("stroke-dasharray"):
+            card.remove(ring)
+    total = sum(languages.values())
+    offset = 0
+    for i, (lang, count) in enumerate(sorted(languages.items(), key=lambda item: -item[1])[:5]):
+        length = count * 157.08 / total
+        ring = element(card, "circle", cx=348, cy=92, r=25, fill="none",
+                       stroke=colors.get(lang, palette[i]), stroke_width=8,
+                       stroke_dasharray=f"{length:.3f} {157.08 - length:.3f}",
+                       stroke_dashoffset=f"{-offset:.3f}", transform="rotate(-90 348 92)")
+        element(ring, "animate", attributeName="stroke-dasharray", begin=f"{.7 + i * .15:.2f}s",
+                dur=".6s", fill="freeze", to=ring.get("stroke-dasharray")).set("from", "0 157.08")
+        offset += length
+    text["96"].text = f"{max(languages.values()) / total:.0%}" if total else "—"
+    card.remove(text["96"])
+    card.append(text["96"])
+    return card
 
 
-def projects_panel(root, featured):
-    # Keep GitSkins' backdrop, frame and header while expanding its four-card grid.
-    group = next(g for g in root.iter(f"{{{SVG}}}g") if g.get("id", "").startswith("gs-projects-"))
+def projects_panel(root, featured, languages):
+    ns = f"{{{SVG}}}"
+    group = next(g for g in root.iter(ns + "g") if g.get("id", "").startswith("gs-projects-"))
+    cards = {a.get("href", "").casefold(): a.find(ns + "g") for a in group.findall(ns + "a")}
+    template = next((card for card in cards.values()
+                     if card is not None and {"19.5", "58", "124.5", "150", "96"} <=
+                     {node.get("y") for node in card.findall(ns + "text")}), None)
     x, y, width, old_height = map(float, root.attrib["viewBox"].split())
-    height = 92 + 166 * max(1, (len(featured) + 1) // 2)
+    height = 96 + 178 * max(1, (len(featured) + 1) // 2)
     root.set("viewBox", f"{x:g} {y:g} {width:g} {height}")
-    for card in group.findall(f"{{{SVG}}}a"):
-        group.remove(card)
-    for rect in group.findall(f"{{{SVG}}}rect"):
+    for link in group.findall(ns + "a"):
+        group.remove(link)
+    for rect in group.findall(ns + "rect"):
         rect.set("height", f"{float(rect.attrib['height']) + height - old_height:g}")
-    for orb in group.findall(f"{{{SVG}}}ellipse"):
+    for orb in group.findall(ns + "ellipse"):
         orb.set("cy", f"{float(orb.attrib['cy']) * height / old_height:g}")
-    for label in group.findall(f"{{{SVG}}}text"):
+    for label in group.findall(ns + "text"):
         if re.fullmatch(r"\d+ projects?", label.text or ""):
             count = len(featured)
             label.text = f"{count} {'project' if count == 1 else 'projects'}"
         elif label.text == "gitskins.com":
             label.set("y", str(height - 11))
     for index, repo in enumerate(featured):
-        project_card(group, repo, index)
+        card = cards.get(repo["html_url"].casefold())
+        if card is None:
+            if template is None:
+                raise ValueError("GitSkins no devolvió una tarjeta de proyectos reutilizable")
+            card = project_card(template, repo, languages[repo["name"]])
+        else:
+            stars = next(text for text in card.findall(ns + "text") if text.get("y") == "150")
+            stars.find(ns + "tspan").tail = f" {repo['stargazers_count']:,}"
+        card.set("transform", f"translate({28 + 410 * (index % 2)},{88 + 178 * (index // 2)})")
+        card.find(ns + "animate").set("begin", f"{.25 + index * .15:.2f}s")
+        group.append(card)
     if not featured:
-        element(group, "text", x=30, y=100, fill="#a5b4fc", font_family=MONO,
+        element(group, "text", x=30, y=120, fill="#a5b4fc", font_family=MONO,
                 font_size=14).text = "Todavía no hay proyectos públicos"
 
 
@@ -227,35 +265,56 @@ def transmission_links(profile, socials):
         yield label, url
 
 
-def write_transmission(links):
+def write_transmission(panel, links, credit):
     folder = ROOT / "assets/transmission"
     folder.mkdir(exist_ok=True)
+    ns = f"{{{SVG}}}"
     badges = []
     active = set()
-    for index, (label, url) in enumerate(links, start=1):
-        path = folder / f"link-{index}.svg"
-        active.add(path)
-        svg = ET.Element(f"{{{SVG}}}svg", {"viewBox": "0 0 210 56", "width": "210", "height": "56"})
-        defs = element(svg, "defs")
-        gradient = element(defs, "linearGradient", id="midnight", x2="100%", y2="100%")
-        for offset, color in (("0%", "#0b1020"), ("62%", "#222344"), ("100%", "#0c1020")):
-            element(gradient, "stop", offset=offset, stop_color=color)
-        element(svg, "rect", x=1, y=1, width=208, height=54, rx=27, fill="url(#midnight)", stroke="#818cf8")
-        element(svg, "circle", cx=27, cy=28, r=14, fill="#818cf8", fill_opacity=".24")
-        element(svg, "text", x=27, y=33, text_anchor="middle", font_family=MONO,
-                font_size=15, fill="#e0e7ff").text = label[:1].upper()
-        element(svg, "text", x=50, y=33, font_family=MONO, font_size=14,
-                font_weight=700, fill="#e0e7ff").text = shorten(label, width=15, placeholder="…")
-        element(svg, "text", x=181, y=33, font_family=MONO, font_size=16, fill="#a5b4fc").text = "↗"
-        path.write_text(ET.tostring(svg, encoding="unicode") + "\n", encoding="utf-8")
-        badges.append(f'<a href="{escape(url, quote=True)}"><img src="assets/transmission/{path.name}" '
-                      f'alt="{escape(label, quote=True)}" width="210" height="56"></a>')
+    for first in range(0, len(links), 3):
+        row = links[first:first + 3]
+        art = deepcopy(panel)
+        group = next(g for g in art.iter(ns + "g") if g.get("id", "").startswith("gs-social-"))
+        chip = next(g for g in group.findall(ns + "g") if g.get("class") == "aura-chip")
+        group.remove(chip)
+        for index, (label, url) in enumerate(row):
+            button = deepcopy(chip)
+            button.set("transform", f"translate({860 * ((index + .5) / len(row) - .5):g} 0)")
+            icon, provider, handle = button.findall(ns + "text")
+            icon.text = label[:1].upper()
+            provider.text = shorten(label, width=15, placeholder="…")
+            parsed = urlsplit(url)
+            account = parsed.path.strip("/").split("/")[-1]
+            value = "@" + account if account else parsed.hostname.removeprefix("www.")
+            handle.text = value if len(value) <= 15 else value[:14] + "…"
+            group.append(button)
+        footer = Midnight()
+        footer.y = 0
+        footer.add_panel(art)
+        if first + len(row) == len(links):
+            footer.line(credit, size=15, center=True)
+        footer.render()
+        height = footer.root.attrib["height"]
+        width = footer.width / len(row)
+        row_badges = []
+        for index, (label, url) in enumerate(row):
+            path = folder / f"link-{first + index + 1}.svg"
+            active.add(path)
+            # Adjacent viewport crops preserve the native background while each link remains clickable.
+            footer.root.attrib.update(width=f"{width:.8f}", viewBox=f"{index * width:.8f} 0 {width:.8f} {height}")
+            svg = ET.tostring(footer.root, encoding="unicode")
+            path.write_text("\n".join(line.rstrip() for line in svg.splitlines()) + "\n", encoding="utf-8")
+            row_badges.append(f'<a href="{escape(url, quote=True)}"><img src="assets/transmission/{path.name}" '
+                              f'alt="{escape(label, quote=True)}" width="{100 // len(row)}%"></a>')
+        badges.append("".join(row_badges))
     for stale in set(folder.glob("link-*.svg")) - active:
         stale.unlink()
     readme = (
         '<!-- Generado por scripts/actualizar_perfil.py -->\n\n'
-        f'[![Portafolio Midnight](assets/perfil-midnight.svg)](https://github.com/{USER}?tab=repositories)\n\n'
-        '<p align="center">\n  ' + "\n  ".join(badges) + "\n</p>\n"
+        '<p align="center">\n'
+        f'<a href="https://github.com/{USER}?tab=repositories"><img src="assets/perfil-midnight.svg" '
+        'alt="Portafolio Midnight" width="100%"></a><br>\n'
+        + "<br>\n".join(badges) + "\n</p>\n"
     )
     (ROOT / "README.md").write_text(readme, encoding="utf-8")
 
@@ -359,6 +418,14 @@ def main():
         reverse=True,
     )[:6]
 
+    existing_cards = {a.get("href", "").casefold() for a in panels["projects"].iter(f"{{{SVG}}}a")}
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        tasks = {
+            repo["name"]: pool.submit(api, f"/repos/{quote(USER, safe='')}/{quote(repo['name'], safe='')}/languages")
+            for repo in featured if repo["html_url"].casefold() not in existing_cards
+        }
+        languages = {repo_name: task.result() for repo_name, task in tasks.items()}
+
     board = Midnight()
     board.line(name, size=44, weight=750, color="#f0f6fc", center=True)
     board.add_panel(panels["sheet-main"])
@@ -371,18 +438,17 @@ def main():
     board.line(f"Racha más larga: {longest_streak(counts)} días · {profile['followers']} seguidores",
                size=17, center=True)
     board.heading("Brightest stars")
-    projects_panel(panels["projects"], featured)
+    projects_panel(panels["projects"], featured, languages)
     board.add_panel(panels["projects"])
     board.heading("Elements")
     board.add_panel(panels["stack"])
     board.heading("The city I built this year")
     board.add_panel(panels["city"])
     board.line("Every building is a day; taller means more contributions.", size=17, center=True)
-    board.line(f"{name} · Character Sheet, Commit Metro, Repo Galaxy y Contribution City con GitSkins",
-               size=15, center=True)
     board.heading("Transmission")
     rendered = board.render()
-    write_transmission(links)
+    credit = f"{name} · Character Sheet, Commit Metro, Repo Galaxy y Contribution City con GitSkins"
+    write_transmission(panels["social"], links, credit)
     (ROOT / "assets/perfil-midnight.svg").write_text(rendered, encoding="utf-8")
     print(f"Panel Midnight con {len(featured)} proyectos, {len(links)} enlaces y {len(counts)} días de actividad pública.")
 

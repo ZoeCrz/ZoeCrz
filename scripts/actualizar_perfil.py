@@ -265,12 +265,13 @@ def transmission_links(profile, socials):
         yield label, url
 
 
-def write_transmission(panel, links, credit):
+def write_transmission(board, panel, links):
     folder = ROOT / "assets/transmission"
     folder.mkdir(exist_ok=True)
     ns = f"{{{SVG}}}"
     badges = []
     active = set()
+    sections = []
     for first in range(0, len(links), 3):
         row = links[first:first + 3]
         art = deepcopy(panel)
@@ -279,7 +280,9 @@ def write_transmission(panel, links, credit):
         group.remove(chip)
         for index, (label, url) in enumerate(row):
             button = deepcopy(chip)
-            button.set("transform", f"translate({860 * ((index + .5) / len(row) - .5):g} 0)")
+            # GitSkins animates the chip's CSS transform. Keep layout on its parent.
+            position = 860 * ((index + .5) / len(row) - .5)
+            element(group, "g", transform=f"translate({position:g} 0)").append(button)
             icon, provider, handle = button.findall(ns + "text")
             icon.text = label[:1].upper()
             provider.text = shorten(label, width=15, placeholder="…")
@@ -287,13 +290,19 @@ def write_transmission(panel, links, credit):
             account = parsed.path.strip("/").split("/")[-1]
             value = "@" + account if account else parsed.hostname.removeprefix("www.")
             handle.text = value if len(value) <= 15 else value[:14] + "…"
-            group.append(button)
         footer = Midnight()
         footer.y = 0
         footer.add_panel(art)
         if first + len(row) == len(links):
-            footer.line(credit, size=15, center=True)
-        footer.render()
+            footer.line("Zoe Cruz", size=15, center=True)
+        sections.append((first, row, footer))
+
+    # All slices use the same outer rectangle and gradient in global coordinates.
+    total_height = board.height + sum(footer.height for _, _, footer in sections)
+    offset = board.height
+    for first, row, footer in sections:
+        footer.render(backdrop_height=total_height, backdrop_offset=offset)
+        offset += footer.height
         height = footer.root.attrib["height"]
         width = footer.width / len(row)
         row_badges = []
@@ -305,7 +314,7 @@ def write_transmission(panel, links, credit):
             svg = ET.tostring(footer.root, encoding="unicode")
             path.write_text("\n".join(line.rstrip() for line in svg.splitlines()) + "\n", encoding="utf-8")
             row_badges.append(f'<a href="{escape(url, quote=True)}"><img src="assets/transmission/{path.name}" '
-                              f'alt="{escape(label, quote=True)}" width="{100 // len(row)}%"></a>')
+                              f'alt="{escape(label, quote=True)}" align="top" width="{100 / len(row):.6f}%"></a>')
         badges.append("".join(row_badges))
     for stale in set(folder.glob("link-*.svg")) - active:
         stale.unlink()
@@ -313,10 +322,13 @@ def write_transmission(panel, links, credit):
         '<!-- Generado por scripts/actualizar_perfil.py -->\n\n'
         '<p align="center">\n'
         f'<a href="https://github.com/{USER}?tab=repositories"><img src="assets/perfil-midnight.svg" '
-        'alt="Portafolio Midnight" width="100%"></a><br>\n'
+        'alt="Portafolio Midnight" align="top" width="100%"></a><br>\n'
         + "<br>\n".join(badges) + "\n</p>\n"
     )
     (ROOT / "README.md").write_text(readme, encoding="utf-8")
+    (ROOT / "assets/perfil-midnight.svg").write_text(
+        board.render(backdrop_height=total_height), encoding="utf-8"
+    )
 
 
 class Midnight:
@@ -368,10 +380,14 @@ class Midnight:
         content.extend(list(root))
         self.y += scaled + 16
 
-    def render(self):
-        height = self.y + 15
+    @property
+    def height(self):
+        return self.y + 15
+
+    def render(self, *, backdrop_height=None, backdrop_offset=0):
+        height = self.height
         self.root.attrib.update(width=str(self.width), height=str(height), viewBox=f"0 0 {self.width} {height}")
-        self.backdrop.set("height", str(height))
+        self.backdrop.attrib.update(y=str(-backdrop_offset), height=str(backdrop_height or height))
         # Check ID uniqueness because CSS and animation references share one SVG document.
         ids = [node.get("id") for node in self.root.iter() if node.get("id")]
         if len(ids) != len(set(ids)):
@@ -446,10 +462,7 @@ def main():
     board.add_panel(panels["city"])
     board.line("Every building is a day; taller means more contributions.", size=17, center=True)
     board.heading("Transmission")
-    rendered = board.render()
-    credit = f"{name} · Character Sheet, Commit Metro, Repo Galaxy y Contribution City con GitSkins"
-    write_transmission(panels["social"], links, credit)
-    (ROOT / "assets/perfil-midnight.svg").write_text(rendered, encoding="utf-8")
+    write_transmission(board, panels["social"], links)
     print(f"Panel Midnight con {len(featured)} proyectos, {len(links)} enlaces y {len(counts)} días de actividad pública.")
 
 

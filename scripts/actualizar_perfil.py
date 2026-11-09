@@ -1,9 +1,11 @@
 """Compose the native GitSkins panels over one Midnight background."""
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
+from html import escape
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import quote, urlencode
+from textwrap import shorten, wrap
+from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree as ET
 import json
@@ -16,6 +18,7 @@ API = "https://api.github.com"
 GITSKINS = "https://www.gitskins.com/api/section/"
 SVG = "http://www.w3.org/2000/svg"
 XLINK = "http://www.w3.org/1999/xlink"
+MONO = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
 ET.register_namespace("", SVG)
 ET.register_namespace("xlink", XLINK)
 THEMES = {
@@ -26,7 +29,6 @@ THEMES = {
     "galaxy": "midnight",
     "projects": "midnight",
     "stack": "midnight",
-    "social": "midnight",
     "city": "aurora",
 }
 TAGS = set("""
@@ -63,7 +65,7 @@ def repositories():
         batch = api(f"/users/{quote(USER, safe='')}/repos", per_page=100, page=page, type="owner")
         rows.extend(r for r in batch if not r["private"])
         if len(batch) < 100:
-            return sorted(rows, key=lambda r: (-r["stargazers_count"], r["name"].lower()))
+            return rows
     raise ValueError("Paginación incompleta de repositorios")
 
 
@@ -121,7 +123,7 @@ def panel(section, avatar):
     params = {"username": USER.lower(), "mode": "dark"}
     if THEMES[section]:
         params["theme"] = THEMES[section]
-    if section in {"sheet-main", "galaxy", "projects", "stack", "social", "city"}:
+    if section in {"sheet-main", "galaxy", "projects", "stack", "city"}:
         params["avatar"] = avatar
     payload, mime = fetch(GITSKINS + section + "?" + urlencode(params))
     if mime != "image/svg+xml" or re.search(rb"<!DOCTYPE|<!ENTITY", payload, re.I):
@@ -152,29 +154,110 @@ def panel(section, avatar):
     return root
 
 
-def exclude_profile_repository(root):
-    profile_url = f"https://github.com/{USER}/{USER}".casefold()
-    for group in root.iter(f"{{{SVG}}}g"):
-        cards = group.findall(f"{{{SVG}}}a")
-        excluded = [
-            card for card in cards
-            if (card.get("href") or card.get(f"{{{XLINK}}}href") or "").rstrip("/").casefold() == profile_url
-        ]
-        if not excluded:
-            continue
+def project_card(parent, repo, index):
+    x = 28 + 410 * (index % 2)
+    y = 76 + 166 * (index // 2)
+    card = element(parent, "g", transform=f"translate({x} {y})")
+    element(card, "rect", width=394, height=150, rx=13,
+            fill="#08080c", fill_opacity=".55", stroke="#818cf8", stroke_opacity=".65")
+    element(card, "line", x1=0, x2=394, y1=29, y2=29, stroke="#818cf8", stroke_opacity=".45")
+    element(card, "circle", cx=378, cy=15, r=4, fill="#3fb950")
+    name = repo["name"]
+    label = name if len(name) <= 31 else name[:30] + "…"
+    element(card, "text", x=16, y=19, fill="#a5b4fc", font_family=MONO, font_size=11).text = f"• {label}"
+    element(card, "text", x=18, y=56, fill="#e0e7ff", font_family=MONO,
+            font_size=17, font_weight=700).text = label
+    description = repo.get("description") or "Sin descripción"
+    for row, line in enumerate(wrap(description, width=48, max_lines=2, placeholder="…")):
+        element(card, "text", x=18, y=78 + row * 16, fill="#a5b4fc", font_family=MONO, font_size=12).text = line
+    language = shorten(repo.get("language") or "Sin lenguaje", width=32, placeholder="…")
+    element(card, "rect", x=18, y=110, width=20 + 7 * len(language), height=22, rx=11,
+            fill="#818cf8", fill_opacity=".16", stroke="#818cf8", stroke_opacity=".45")
+    element(card, "text", x=28, y=125, fill="#b4bcff", font_family=MONO, font_size=11).text = language
+    element(card, "text", x=374, y=125, text_anchor="end", fill="#d7b9fc", font_family=MONO,
+            font_size=13).text = f"★ {repo['stargazers_count']:,}"
 
-        contents = [card.find(f"{{{SVG}}}g") for card in cards]
-        slots = [content.get("transform") if content is not None else None for content in contents]
-        remaining = [content for card, content in zip(cards, contents) if card not in excluded]
-        if all(slots):
-            for content, slot in zip(remaining, slots):
-                content.set("transform", slot)
-        for card in excluded:
-            group.remove(card)
-        for label in group.findall(f"{{{SVG}}}text"):
-            if re.fullmatch(r"\d+ projects?", label.text or ""):
-                count = len(remaining)
-                label.text = f"{count} {'project' if count == 1 else 'projects'}"
+
+def projects_panel(root, featured):
+    # Keep GitSkins' backdrop, frame and header while expanding its four-card grid.
+    group = next(g for g in root.iter(f"{{{SVG}}}g") if g.get("id", "").startswith("gs-projects-"))
+    x, y, width, old_height = map(float, root.attrib["viewBox"].split())
+    height = 92 + 166 * max(1, (len(featured) + 1) // 2)
+    root.set("viewBox", f"{x:g} {y:g} {width:g} {height}")
+    for card in group.findall(f"{{{SVG}}}a"):
+        group.remove(card)
+    for rect in group.findall(f"{{{SVG}}}rect"):
+        rect.set("height", f"{float(rect.attrib['height']) + height - old_height:g}")
+    for orb in group.findall(f"{{{SVG}}}ellipse"):
+        orb.set("cy", f"{float(orb.attrib['cy']) * height / old_height:g}")
+    for label in group.findall(f"{{{SVG}}}text"):
+        if re.fullmatch(r"\d+ projects?", label.text or ""):
+            count = len(featured)
+            label.text = f"{count} {'project' if count == 1 else 'projects'}"
+        elif label.text == "gitskins.com":
+            label.set("y", str(height - 11))
+    for index, repo in enumerate(featured):
+        project_card(group, repo, index)
+    if not featured:
+        element(group, "text", x=30, y=100, fill="#a5b4fc", font_family=MONO,
+                font_size=14).text = "Todavía no hay proyectos públicos"
+
+
+def transmission_links(profile, socials):
+    labels = {"linkedin": "LinkedIn", "instagram": "Instagram", "youtube": "YouTube",
+              "github": "GitHub", "mastodon": "Mastodon", "bluesky": "Bluesky"}
+    candidates = [{"provider": "github", "url": profile["html_url"]}, *socials]
+    if profile.get("blog"):
+        blog = profile["blog"].strip()
+        candidates.append({"provider": "website", "url": blog if "://" in blog else f"https://{blog}"})
+    seen = set()
+    for account in candidates:
+        url = account["url"].strip()
+        try:
+            parsed = urlsplit(url)
+            valid = parsed.scheme in {"https", "http"} and parsed.hostname and not parsed.username
+        except ValueError:
+            continue
+        key = url.rstrip("/")
+        if not valid or key in seen or any(ch.isspace() for ch in url):
+            continue
+        seen.add(key)
+        provider = account["provider"].lower()
+        label = labels.get(provider) or parsed.hostname.removeprefix("www.")
+        yield label, url
+
+
+def write_transmission(links):
+    folder = ROOT / "assets/transmission"
+    folder.mkdir(exist_ok=True)
+    badges = []
+    active = set()
+    for index, (label, url) in enumerate(links, start=1):
+        path = folder / f"link-{index}.svg"
+        active.add(path)
+        svg = ET.Element(f"{{{SVG}}}svg", {"viewBox": "0 0 210 56", "width": "210", "height": "56"})
+        defs = element(svg, "defs")
+        gradient = element(defs, "linearGradient", id="midnight", x2="100%", y2="100%")
+        for offset, color in (("0%", "#0b1020"), ("62%", "#222344"), ("100%", "#0c1020")):
+            element(gradient, "stop", offset=offset, stop_color=color)
+        element(svg, "rect", x=1, y=1, width=208, height=54, rx=27, fill="url(#midnight)", stroke="#818cf8")
+        element(svg, "circle", cx=27, cy=28, r=14, fill="#818cf8", fill_opacity=".24")
+        element(svg, "text", x=27, y=33, text_anchor="middle", font_family=MONO,
+                font_size=15, fill="#e0e7ff").text = label[:1].upper()
+        element(svg, "text", x=50, y=33, font_family=MONO, font_size=14,
+                font_weight=700, fill="#e0e7ff").text = shorten(label, width=15, placeholder="…")
+        element(svg, "text", x=181, y=33, font_family=MONO, font_size=16, fill="#a5b4fc").text = "↗"
+        path.write_text(ET.tostring(svg, encoding="unicode") + "\n", encoding="utf-8")
+        badges.append(f'<a href="{escape(url, quote=True)}"><img src="assets/transmission/{path.name}" '
+                      f'alt="{escape(label, quote=True)}" width="210" height="56"></a>')
+    for stale in set(folder.glob("link-*.svg")) - active:
+        stale.unlink()
+    readme = (
+        '<!-- Generado por scripts/actualizar_perfil.py -->\n\n'
+        f'[![Portafolio Midnight](assets/perfil-midnight.svg)](https://github.com/{USER}?tab=repositories)\n\n'
+        '<p align="center">\n  ' + "\n  ".join(badges) + "\n</p>\n"
+    )
+    (ROOT / "README.md").write_text(readme, encoding="utf-8")
 
 
 class Midnight:
@@ -263,9 +346,18 @@ def main():
         panels = {section: pool.submit(panel, section, profile["avatar_url"]) for section in THEMES}
         repos = pool.submit(repositories)
         calendar = pool.submit(public_calendar)
+        socials = pool.submit(api, f"/users/{quote(USER, safe='')}/social_accounts", per_page=100)
         panels = {section: task.result() for section, task in panels.items()}
-        stars = sum(repo["stargazers_count"] for repo in repos.result())
+        repos = repos.result()
         counts = calendar.result()
+        links = list(transmission_links(profile, socials.result()))
+
+    stars = sum(repo["stargazers_count"] for repo in repos)
+    featured = sorted(
+        (repo for repo in repos if repo["name"].casefold() != USER.casefold() and not repo["fork"]),
+        key=lambda repo: (repo["created_at"], repo["stargazers_count"], repo["name"].casefold()),
+        reverse=True,
+    )[:6]
 
     board = Midnight()
     board.line(name, size=44, weight=750, color="#f0f6fc", center=True)
@@ -279,20 +371,20 @@ def main():
     board.line(f"Racha más larga: {longest_streak(counts)} días · {profile['followers']} seguidores",
                size=17, center=True)
     board.heading("Brightest stars")
-    exclude_profile_repository(panels["projects"])
+    projects_panel(panels["projects"], featured)
     board.add_panel(panels["projects"])
     board.heading("Elements")
     board.add_panel(panels["stack"])
     board.heading("The city I built this year")
     board.add_panel(panels["city"])
     board.line("Every building is a day; taller means more contributions.", size=17, center=True)
-    board.heading("Transmission")
-    board.add_panel(panels["social"])
     board.line(f"{name} · Character Sheet, Commit Metro, Repo Galaxy y Contribution City con GitSkins",
                size=15, center=True)
+    board.heading("Transmission")
     rendered = board.render()
+    write_transmission(links)
     (ROOT / "assets/perfil-midnight.svg").write_text(rendered, encoding="utf-8")
-    print(f"Panel Midnight con {len(panels)} diseños nativos y {len(counts)} días de actividad pública.")
+    print(f"Panel Midnight con {len(featured)} proyectos, {len(links)} enlaces y {len(counts)} días de actividad pública.")
 
 
 if __name__ == "__main__":

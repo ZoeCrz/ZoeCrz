@@ -25,7 +25,7 @@ jobs:
         run: python3 scripts/actualizar_perfil.py
       - name: Guardar los cambios
         run: |
-          git add -- assets/perfil-midnight.svg
+          git add -A -- README.md assets/perfil-midnight.svg assets/transmission
           if git diff --cached --quiet; then exit 0; fi
           git -c user.name='github-actions[bot]' \
               -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \

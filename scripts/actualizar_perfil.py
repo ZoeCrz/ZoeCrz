@@ -152,6 +152,31 @@ def panel(section, avatar):
     return root
 
 
+def exclude_profile_repository(root):
+    profile_url = f"https://github.com/{USER}/{USER}".casefold()
+    for group in root.iter(f"{{{SVG}}}g"):
+        cards = group.findall(f"{{{SVG}}}a")
+        excluded = [
+            card for card in cards
+            if (card.get("href") or card.get(f"{{{XLINK}}}href") or "").rstrip("/").casefold() == profile_url
+        ]
+        if not excluded:
+            continue
+
+        contents = [card.find(f"{{{SVG}}}g") for card in cards]
+        slots = [content.get("transform") if content is not None else None for content in contents]
+        remaining = [content for card, content in zip(cards, contents) if card not in excluded]
+        if all(slots):
+            for content, slot in zip(remaining, slots):
+                content.set("transform", slot)
+        for card in excluded:
+            group.remove(card)
+        for label in group.findall(f"{{{SVG}}}text"):
+            if re.fullmatch(r"\d+ projects?", label.text or ""):
+                count = len(remaining)
+                label.text = f"{count} {'project' if count == 1 else 'projects'}"
+
+
 class Midnight:
     width = 944
     content_width = 880
@@ -254,6 +279,7 @@ def main():
     board.line(f"Racha más larga: {longest_streak(counts)} días · {profile['followers']} seguidores",
                size=17, center=True)
     board.heading("Brightest stars")
+    exclude_profile_repository(panels["projects"])
     board.add_panel(panels["projects"])
     board.heading("Elements")
     board.add_panel(panels["stack"])

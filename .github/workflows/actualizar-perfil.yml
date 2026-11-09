@@ -1,0 +1,33 @@
+name: Actualizar perfil Midnight
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 12 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: perfil-midnight
+  cancel-in-progress: false
+
+jobs:
+  generar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generar el panel con datos públicos
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PROFILE_USER: ${{ github.repository_owner }}
+        run: python3 scripts/actualizar_perfil.py
+      - name: Guardar los cambios
+        run: |
+          git add -- README.md assets/perfil-midnight.svg
+          if git diff --cached --quiet; then exit 0; fi
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -m 'Actualizar panel Midnight'
+          git push

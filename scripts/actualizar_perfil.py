@@ -1,9 +1,7 @@
 """Compose the native GitSkins panels over one Midnight background."""
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from datetime import date, timedelta
 from html import escape
-from html.parser import HTMLParser
 from pathlib import Path
 from textwrap import shorten, wrap
 from urllib.parse import quote, urlencode, urlsplit
@@ -69,45 +67,6 @@ def repositories():
         if len(batch) < 100:
             return rows
     raise ValueError("Paginación incompleta de repositorios")
-
-
-class Calendar(HTMLParser):
-    """Associate public day cells with their contribution tooltips."""
-    def __init__(self):
-        super().__init__()
-        self.days = {}
-        self.tooltips = {}
-        self.target = None
-        self.fragments = []
-
-    def handle_starttag(self, tag, attrs):
-        attrs = dict(attrs)
-        if tag == "td" and "ContributionCalendar-day" in attrs.get("class", "") and attrs.get("data-date"):
-            self.days[attrs["id"]] = date.fromisoformat(attrs["data-date"])
-        if tag == "tool-tip":
-            self.target = attrs.get("for")
-            self.fragments = []
-
-    def handle_data(self, data):
-        if self.target:
-            self.fragments.append(data)
-
-    def handle_endtag(self, tag):
-        if tag == "tool-tip" and self.target:
-            self.tooltips[self.target] = " ".join("".join(self.fragments).split())
-            self.target = None
-
-    def counts(self):
-        values = {}
-        for key, day in self.days.items():
-            match = re.match(r"^(No|[0-9][0-9,]*) contributions? on\b", self.tooltips.get(key, ""))
-            if not match:
-                raise ValueError(f"No se pudo leer el calendario público del {day}")
-            number = match[1]
-            values[day] = 0 if number == "No" else int(number.replace(",", ""))
-        if len(values) < 350:
-            raise ValueError("Calendario público incompleto")
-        return dict(sorted(values.items()))
 
 
 def element(parent, tag, **attrs):
@@ -396,38 +355,17 @@ class Midnight:
         return "\n".join(line.rstrip() for line in svg.splitlines()) + "\n"
 
 
-def longest_streak(counts):
-    longest = streak = 0
-    previous = None
-    for day, number in counts.items():
-        if previous != day - timedelta(days=1):
-            streak = 0
-        streak = streak + 1 if number else 0
-        longest = max(longest, streak)
-        previous = day
-    return longest
-
-
-def public_calendar():
-    calendar = Calendar()
-    calendar.feed(fetch(f"https://github.com/users/{quote(USER, safe='')}/contributions")[0].decode())
-    return calendar.counts()
-
-
 def main():
     profile = api(f"/users/{quote(USER, safe='')}")
     name = profile.get("name") or profile["login"]
     with ThreadPoolExecutor(max_workers=8) as pool:
         panels = {section: pool.submit(panel, section, profile["avatar_url"]) for section in THEMES}
         repos = pool.submit(repositories)
-        calendar = pool.submit(public_calendar)
         socials = pool.submit(api, f"/users/{quote(USER, safe='')}/social_accounts", per_page=100)
         panels = {section: task.result() for section, task in panels.items()}
         repos = repos.result()
-        counts = calendar.result()
         links = list(transmission_links(profile, socials.result()))
 
-    stars = sum(repo["stargazers_count"] for repo in repos)
     featured = sorted(
         (repo for repo in repos if repo["name"].casefold() != USER.casefold() and not repo["fork"]),
         key=lambda repo: (repo["created_at"], repo["stargazers_count"], repo["name"].casefold()),
@@ -449,10 +387,6 @@ def main():
     board.add_panel(panels["sheet-inventory"])
     board.add_panel(panels["metro-map"])
     board.add_panel(panels["galaxy"])
-    board.line(f"{profile['public_repos']} repos públicos · {stars} estrellas · {sum(counts.values())} contribuciones en el último año",
-               size=18, center=True)
-    board.line(f"Racha más larga: {longest_streak(counts)} días · {profile['followers']} seguidores",
-               size=17, center=True)
     board.heading("Brightest stars")
     projects_panel(panels["projects"], featured, languages)
     board.add_panel(panels["projects"])
@@ -463,7 +397,7 @@ def main():
     board.line("Every building is a day; taller means more contributions.", size=17, center=True)
     board.heading("Transmission")
     write_transmission(board, panels["social"], links)
-    print(f"Panel Midnight con {len(featured)} proyectos, {len(links)} enlaces y {len(counts)} días de actividad pública.")
+    print(f"Panel Midnight con {len(featured)} proyectos y {len(links)} enlaces.")
 
 
 if __name__ == "__main__":
